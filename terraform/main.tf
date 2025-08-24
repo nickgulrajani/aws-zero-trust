@@ -1,5 +1,5 @@
 # -------------------------------
-# VPC + Private Subnets (no IGW shown) — isolation
+# VPC + Private Subnets (no IGW) — isolation
 # -------------------------------
 resource "aws_vpc" "zt_vpc" {
   cidr_block           = "10.42.0.0/16"
@@ -24,7 +24,7 @@ resource "aws_subnet" "private_b" {
   tags                    = { Name = "${var.name_prefix}-priv-b-${var.environment}" }
 }
 
-# Optional private route table (no IGW/NAT added in dry run)
+# Optional private route table (no IGW/NAT in dry run)
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.zt_vpc.id
   tags   = { Name = "${var.name_prefix}-rt-private-${var.environment}" }
@@ -41,25 +41,25 @@ resource "aws_route_table_association" "b" {
 }
 
 # -------------------------------
-# Security Groups (no inline rules – rules defined below to avoid cycles)
+# Security Groups (no inline rules; rules defined below to avoid cycles)
 # -------------------------------
 resource "aws_security_group" "workload_sg" {
   name        = "${var.name_prefix}-workload-sg-${var.environment}"
-  description = "Workload SG"
+  description = "Workload security group"
   vpc_id      = aws_vpc.zt_vpc.id
   tags        = { Name = "${var.name_prefix}-workload-sg-${var.environment}" }
 }
 
 resource "aws_security_group" "endpoint_sg" {
   name        = "${var.name_prefix}-vpce-sg-${var.environment}"
-  description = "Interface VPCE SG"
+  description = "Interface VPC endpoint security group"
   vpc_id      = aws_vpc.zt_vpc.id
   tags        = { Name = "${var.name_prefix}-vpce-sg-${var.environment}" }
 }
 
-# ---- SG Rules (break cycle) ----
+# ---- SG Rules (cycle-free) ----
 
-# Workload egress -> VPCE on 443
+# Workload egress to VPCE on 443
 resource "aws_security_group_rule" "workload_to_vpce_egress" {
   type                     = "egress"
   security_group_id        = aws_security_group.workload_sg.id
@@ -67,10 +67,10 @@ resource "aws_security_group_rule" "workload_to_vpce_egress" {
   to_port                  = 443
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.endpoint_sg.id
-  description              = "Workload egress -> Interface VPCE only"
+  description              = "Workload egress to interface VPC endpoint on 443"
 }
 
-# VPCE ingress <- Workload on 443
+# VPCE ingress from Workload on 443
 resource "aws_security_group_rule" "vpce_from_workload_ingress" {
   type                     = "ingress"
   security_group_id        = aws_security_group.endpoint_sg.id
@@ -78,7 +78,7 @@ resource "aws_security_group_rule" "vpce_from_workload_ingress" {
   to_port                  = 443
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.workload_sg.id
-  description              = "Allow 443 from workload SG"
+  description              = "Allow 443 from workload security group"
 }
 
 # Optional: restrict VPCE egress within VPC only
@@ -89,7 +89,7 @@ resource "aws_security_group_rule" "vpce_egress_vpc_only" {
   to_port           = 0
   protocol          = "-1"
   cidr_blocks       = ["10.42.0.0/16"]
-  description       = "Restrict VPCE egress within VPC"
+  description       = "Restrict VPC endpoint egress within VPC CIDR"
 }
 
 # -------------------------------
@@ -110,7 +110,7 @@ resource "aws_vpc_endpoint" "vpce" {
   vpc_endpoint_type   = "Interface"
   private_dns_enabled = true
   subnet_ids          = [aws_subnet.private_a.id, aws_subnet.private_b.id]
-  security_group_ids  = [aws_security_group.endpoint_sg.id] # attach endpoint SG
+  security_group_ids  = [aws_security_group.endpoint_sg.id]
   tags                = { Name = "${var.name_prefix}-vpce-${replace(each.key, ".", "-")}" }
 }
 
@@ -153,7 +153,7 @@ resource "aws_s3_bucket_policy" "secure_policy" {
 # KMS CMK + Least-Privilege IAM Role
 # -------------------------------
 resource "aws_kms_key" "app" {
-  description             = "KMS CMK"
+  description             = "Application KMS CMK"
   enable_key_rotation     = true
   deletion_window_in_days = 7
   tags                    = { Name = "${var.name_prefix}-kms-${var.environment}" }
