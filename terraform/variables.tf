@@ -27,3 +27,9 @@ variable "org_target_id" {
   default     = "r-exampleroot"
   description = "Organizations root/OU ID for SCP attachment (placeholder)"
 }
+
+variable "vpce_id_for_policy" {
+  type        = string
+  default     = "vpce-dryrun-placeholder"
+  description = "Static VPC Endpoint ID used only for dry-run to make bucket policy JSON known at plan time. Override in real deploys."
+}

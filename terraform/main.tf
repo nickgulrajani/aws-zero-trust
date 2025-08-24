@@ -142,7 +142,9 @@ resource "aws_s3_bucket_policy" "secure_policy" {
       ]
       Condition = {
         StringNotEquals = {
-          "aws:SourceVpce" = local.s3_vpce_id
+          # Use a static, known-at-plan-time value for dry runs.
+          # In real applies, set this to the actual VPCe ID or switch back to local.s3_vpce_id.
+          "aws:SourceVpce" = var.vpce_id_for_policy
         }
       }
     }]
