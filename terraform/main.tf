@@ -24,53 +24,72 @@ resource "aws_subnet" "private_b" {
   tags                    = { Name = "${var.name_prefix}-priv-b-${var.environment}" }
 }
 
+# Optional private route table (no IGW/NAT added in dry run)
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.zt_vpc.id
+  tags   = { Name = "${var.name_prefix}-rt-private-${var.environment}" }
+}
+
+resource "aws_route_table_association" "a" {
+  subnet_id      = aws_subnet.private_a.id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_route_table_association" "b" {
+  subnet_id      = aws_subnet.private_b.id
+  route_table_id = aws_route_table.private.id
+}
+
 # -------------------------------
-# Security Groups
+# Security Groups (no inline rules – rules defined below to avoid cycles)
 # -------------------------------
-# Workload SG: no ingress; egress ONLY to the endpoint SG on 443
 resource "aws_security_group" "workload_sg" {
   name        = "${var.name_prefix}-workload-sg-${var.environment}"
   description = "Workload SG"
   vpc_id      = aws_vpc.zt_vpc.id
-
-  # No ingress rules -> traffic must come through controlled fronts (LB/proxy/etc.)
-
-  # Egress only to VPC endpoint SG on 443
-  egress {
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.endpoint_sg.id]
-    description     = "Workload egress -> Interface VPCE only"
-  }
-
-  tags = { Name = "${var.name_prefix}-workload-sg-${var.environment}" }
+  tags        = { Name = "${var.name_prefix}-workload-sg-${var.environment}" }
 }
 
-# Endpoint SG: allow inbound 443 only from the workload SG
 resource "aws_security_group" "endpoint_sg" {
   name        = "${var.name_prefix}-vpce-sg-${var.environment}"
   description = "Interface VPCE SG"
   vpc_id      = aws_vpc.zt_vpc.id
+  tags        = { Name = "${var.name_prefix}-vpce-sg-${var.environment}" }
+}
 
-  ingress {
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.workload_sg.id]
-    description     = "Allow 443 from workload SG"
-  }
+# ---- SG Rules (break cycle) ----
 
-  # (Optional) Restrictive egress back into VPC (not required for VPCE, but kept tight)
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["10.42.0.0/16"]
-    description = "Restrict egress within VPC"
-  }
+# Workload egress -> VPCE on 443
+resource "aws_security_group_rule" "workload_to_vpce_egress" {
+  type                     = "egress"
+  security_group_id        = aws_security_group.workload_sg.id
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.endpoint_sg.id
+  description              = "Workload egress -> Interface VPCE only"
+}
 
-  tags = { Name = "${var.name_prefix}-vpce-sg-${var.environment}" }
+# VPCE ingress <- Workload on 443
+resource "aws_security_group_rule" "vpce_from_workload_ingress" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.endpoint_sg.id
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.workload_sg.id
+  description              = "Allow 443 from workload SG"
+}
+
+# Optional: restrict VPCE egress within VPC only
+resource "aws_security_group_rule" "vpce_egress_vpc_only" {
+  type              = "egress"
+  security_group_id = aws_security_group.endpoint_sg.id
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["10.42.0.0/16"]
+  description       = "Restrict VPCE egress within VPC"
 }
 
 # -------------------------------
@@ -91,10 +110,11 @@ resource "aws_vpc_endpoint" "vpce" {
   vpc_endpoint_type   = "Interface"
   private_dns_enabled = true
   subnet_ids          = [aws_subnet.private_a.id, aws_subnet.private_b.id]
-  security_group_ids  = [aws_security_group.endpoint_sg.id] # <-- attach endpoint SG
+  security_group_ids  = [aws_security_group.endpoint_sg.id] # attach endpoint SG
   tags                = { Name = "${var.name_prefix}-vpce-${replace(each.key, ".", "-")}" }
 }
 
+# ID for S3 endpoint to enforce in the bucket policy
 locals {
   s3_vpce_id = aws_vpc_endpoint.vpce["com.amazonaws.${var.aws_region}.s3"].id
 }
@@ -130,7 +150,7 @@ resource "aws_s3_bucket_policy" "secure_policy" {
 }
 
 # -------------------------------
-# KMS Key + Least-Privilege IAM Role
+# KMS CMK + Least-Privilege IAM Role
 # -------------------------------
 resource "aws_kms_key" "app" {
   description             = "KMS CMK"
@@ -182,9 +202,11 @@ resource "aws_iam_role_policy" "app_policy" {
 # -------------------------------
 output "zero_trust_summary" {
   value = {
-    vpc_id   = aws_vpc.zt_vpc.id
-    vpce_ids = [for k, v in aws_vpc_endpoint.vpce : v.id]
-    bucket   = aws_s3_bucket.secure_data.bucket
-    kms_arn  = aws_kms_key.app.arn
+    vpc_id          = aws_vpc.zt_vpc.id
+    private_subnets = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+    vpce_ids        = [for k, v in aws_vpc_endpoint.vpce : v.id]
+    s3_bucket       = aws_s3_bucket.secure_data.bucket
+    kms_key_arn     = aws_kms_key.app.arn
+    iam_role        = aws_iam_role.app_role.name
   }
 }

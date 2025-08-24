@@ -48,7 +48,7 @@ jobs:
           terraform -chdir=terraform show -json tfplan.binary > tfplan.json
           jq '.resource_changes | length' tfplan.json
 
-      - name: Check for wide-open SG rules
+      - name: Gate — block wide-open SG rules
         run: |
           set -euo pipefail
           BAD=$(
@@ -77,23 +77,66 @@ jobs:
             echo "✅ No wide-open security group rules."
           fi
 
-      - name: Check S3 bucket policy for PrivateLink
+      - name: Gate — bucket policy must enforce aws:sourceVpce
         run: |
           set -euo pipefail
           HAS_VPCE=$(
             jq -r '
-              [ .resource_changes[]?
-                | select(.type=="aws_s3_bucket_policy")
-                | (.change.after.policy | tostring) | contains("aws:sourceVpce")
-              ] | any
+              any(
+                .resource_changes[]?;
+                (.type=="aws_s3_bucket_policy")
+                and (
+                  (try (.change.after.policy | fromjson) catch {}) as $p
+                  | any($p.Statement[]?;
+                        (.Condition? // {})
+                        | (.StringNotEquals? // {})
+                        | has("aws:sourceVpce")
+                  )
+                )
+              )
             ' tfplan.json
           )
           if [ "$HAS_VPCE" != "true" ]; then
-            echo "::error::S3 bucket policy missing aws:sourceVpce"
+            echo "::group::DEBUG: S3 bucket policies in plan"
+            jq -r '.resource_changes[]? | select(.type=="aws_s3_bucket_policy") | .change.after.policy' tfplan.json
+            echo "::endgroup::"
+            echo "::error::S3 bucket policy missing Condition.StringNotEquals[\"aws:sourceVpce\"]"
             exit 1
           else
             echo "✅ S3 bucket policy enforces aws:sourceVpce."
           fi
+
+      - name: Generate plan summary (Markdown)
+        run: |
+          set -euo pipefail
+          ADDS=$(jq '[.resource_changes[]? | select(.change.actions|index("create"))] | length' tfplan.json)
+          TOP=$(jq -r '
+            [.resource_changes[]? | select(.change.actions|index("create")) | .type]
+            | group_by(.) | map({type: .[0], count: length})
+            | sort_by(-.count) | (["Type","Creates"] as $h | $h), (.[] | [.type, (.count|tostring)])
+            | @tsv' tfplan.json | column -t)
+          {
+            echo "# Zero Trust Plan Summary"
+            echo
+            echo "**Adds:** ${ADDS}"
+            echo
+            echo "## Created Resource Types"
+            echo '```text'
+            echo "$TOP"
+            echo '```'
+            echo
+            echo "## Gates"
+            echo "- ✅ No wide-open SG rules"
+            echo "- ✅ S3 bucket policy enforces aws:sourceVpce"
+          } > plan-summary.md
+          sed -n '1,80p' plan-summary.md
+          {
+            echo "### Zero Trust Plan Summary"
+            echo
+            echo "- Adds: **${ADDS}**"
+            echo
+            echo "_See artifacts for full plan & checks._"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -102,4 +145,5 @@ jobs:
           path: |
             terraform/tfplan.binary
             tfplan.json
+            plan-summary.md
           if-no-files-found: error
