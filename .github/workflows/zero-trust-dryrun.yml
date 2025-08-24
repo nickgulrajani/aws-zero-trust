@@ -1,0 +1,80 @@
+name: zero-trust-dryrun
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform fmt/validate
+        run: |
+          terraform -chdir=terraform init -backend=false
+          terraform -chdir=terraform fmt -recursive
+          terraform -chdir=terraform validate
+
+      - name: Terraform plan (dry-run only)
+        env:
+          AWS_ACCESS_KEY_ID: dummy
+          AWS_SECRET_ACCESS_KEY: dummy
+        run: |
+          set -euo pipefail
+          terraform -chdir=terraform init -backend=false
+          terraform -chdir=terraform plan -refresh=false             -var-file=../tfvars/minimal.tfvars             -out=tfplan.binary
+          terraform -chdir=terraform show tfplan.binary | sed -n '1,150p'
+
+      - name: Convert plan to JSON
+        run: |
+          terraform -chdir=terraform show -json tfplan.binary > tfplan.json
+
+      - name: Check for wide-open SG rules
+        run: |
+          BAD=$(jq -r '
+            [.resource_changes[]? | select(.type=="aws_security_group") | . as $rc
+              | ($rc.change.after // {}) as $a
+              | select(
+                  [($a.ingress//[])[]? | (.cidr_blocks//[])[]? | contains("0.0.0.0/0") ] | any or
+                  [($a.egress//[])[]? | (.cidr_blocks//[])[]? | contains("0.0.0.0/0") ] | any
+              )
+              | $rc.address] | .[]' tfplan.json)
+          if [ -n "$BAD" ]; then
+            echo "::error::Insecure SGs: $BAD"
+            exit 1
+          fi
+
+      - name: Check S3 bucket policy for PrivateLink
+        run: |
+          HAS_VPCE=$(jq -r '
+            [.resource_changes[]?
+              | select(.type=="aws_s3_bucket_policy")
+              | (.change.after.policy|tostring)
+              | contains("aws:sourceVpce")
+            ] | any' tfplan.json)
+          if [ "$HAS_VPCE" != "true" ]; then
+            echo "::error::S3 bucket policy missing aws:sourceVpce"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-trust-artifacts
+          path: |
+            terraform/tfplan.binary
+            tfplan.json

@@ -1,0 +1,5 @@
+project     = "fintech-zero-trust"
+environment = "dryrun"
+aws_region  = "us-east-1"
+name_prefix = "zt"
+org_target_id = "r-exampleroot"
