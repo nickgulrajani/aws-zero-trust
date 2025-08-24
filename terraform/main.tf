@@ -41,7 +41,7 @@ resource "aws_route_table_association" "b" {
 }
 
 # -------------------------------
-# Security Groups (no inline rules; rules defined below to avoid cycles)
+# Security Groups (no inline rules; rules created below to avoid cycles)
 # -------------------------------
 resource "aws_security_group" "workload_sg" {
   name        = "${var.name_prefix}-workload-sg-${var.environment}"
@@ -120,7 +120,7 @@ locals {
 }
 
 # -------------------------------
-# S3 bucket locked to PrivateLink via aws:sourceVpce
+# S3 bucket locked to PrivateLink via aws:SourceVpce
 # -------------------------------
 resource "aws_s3_bucket" "secure_data" {
   bucket = "${var.name_prefix}-secure-data-${var.environment}"
@@ -142,7 +142,7 @@ resource "aws_s3_bucket_policy" "secure_policy" {
       ]
       Condition = {
         StringNotEquals = {
-          "aws:sourceVpce" = local.s3_vpce_id
+          "aws:SourceVpce" = local.s3_vpce_id
         }
       }
     }]

@@ -40,12 +40,15 @@ jobs:
           terraform -chdir=terraform plan -refresh=false \
             -var-file=../tfvars/minimal.tfvars \
             -out=tfplan.binary
+          echo "== human-readable plan (first 150 lines) =="
           terraform -chdir=terraform show tfplan.binary | sed -n '1,150p'
+          test -f terraform/tfplan.binary && echo "✅ terraform/tfplan.binary exists"
 
       - name: Convert plan to JSON
         run: |
           set -euo pipefail
           terraform -chdir=terraform show -json tfplan.binary > tfplan.json
+          ls -la tfplan.json
           jq '.resource_changes | length' tfplan.json
 
       - name: Gate — block wide-open SG rules
@@ -61,8 +64,10 @@ jobs:
                 | ($a.egress  // []) as $eg
                 | {
                     addr: $rc.address,
-                    open_ing: ( [ $ing[]? | ((.cidr_blocks // [])[]?), ((.ipv6_cidr_blocks // [])[]?) ] | any(.=="0.0.0.0/0" or .=="::/0") ),
-                    open_egr: ( [ $eg[]?  | ((.cidr_blocks // [])[]?), ((.ipv6_cidr_blocks // [])[]?) ] | any(.=="0.0.0.0/0" or .=="::/0") )
+                    open_ing: ( [ $ing[]? | ((.cidr_blocks // [])[]?), ((.ipv6_cidr_blocks // [])[]?) ]
+                                | any(.=="0.0.0.0/0" or .=="::/0") ),
+                    open_egr: ( [ $eg[]?  | ((.cidr_blocks // [])[]?), ((.ipv6_cidr_blocks // [])[]?) ]
+                                | any(.=="0.0.0.0/0" or .=="::/0") )
                   }
                 | select(.open_ing or .open_egr)
                 | .addr
@@ -77,7 +82,7 @@ jobs:
             echo "✅ No wide-open security group rules."
           fi
 
-      - name: Gate — bucket policy must enforce aws:sourceVpce
+      - name: Gate — bucket policy must enforce aws:SourceVpce
         run: |
           set -euo pipefail
           HAS_VPCE=$(
@@ -90,7 +95,7 @@ jobs:
                   | any($p.Statement[]?;
                         (.Condition? // {})
                         | (.StringNotEquals? // {})
-                        | has("aws:sourceVpce")
+                        | (has("aws:SourceVpce") or has("aws:sourceVpce"))
                   )
                 )
               )
@@ -100,10 +105,10 @@ jobs:
             echo "::group::DEBUG: S3 bucket policies in plan"
             jq -r '.resource_changes[]? | select(.type=="aws_s3_bucket_policy") | .change.after.policy' tfplan.json
             echo "::endgroup::"
-            echo "::error::S3 bucket policy missing Condition.StringNotEquals[\"aws:sourceVpce\"]"
+            echo "::error::S3 bucket policy missing Condition.StringNotEquals[\"aws:SourceVpce\"]"
             exit 1
           else
-            echo "✅ S3 bucket policy enforces aws:sourceVpce."
+            echo "✅ S3 bucket policy enforces aws:SourceVpce."
           fi
 
       - name: Generate plan summary (Markdown)
@@ -127,7 +132,7 @@ jobs:
             echo
             echo "## Gates"
             echo "- ✅ No wide-open SG rules"
-            echo "- ✅ S3 bucket policy enforces aws:sourceVpce"
+            echo "- ✅ S3 bucket policy enforces aws:SourceVpce"
           } > plan-summary.md
           sed -n '1,80p' plan-summary.md
           {
